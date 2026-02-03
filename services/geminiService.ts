@@ -53,56 +53,40 @@ export const sendMessageToHalalGPT = async (
             throw new Error("No image element returned from Puter AI");
           }
 
-          // Robust Base64 Conversion Strategy
-          const base64Image = await new Promise<string>(async (resolve, reject) => {
-              // Strategy 1: If it's already a Data URI
-              if (imgElement.src && imgElement.src.startsWith('data:')) {
-                  resolve(imgElement.src.split(',')[1]);
+          // Robust extraction of Base64
+          const base64Image = await new Promise<string>((resolve, reject) => {
+              
+              // Case 1: The src is ALREADY a base64 data URI (Common in some Puter environments)
+              if (imgElement.src && imgElement.src.startsWith('data:image')) {
+                  const parts = imgElement.src.split(',');
+                  if (parts.length > 1) {
+                      resolve(parts[1]);
+                      return;
+                  }
+              }
+
+              // Case 2: Use Fetch/Blob (Safest for Blob URLs)
+              if (imgElement.src.startsWith('blob:') || imgElement.src.startsWith('http')) {
+                  fetch(imgElement.src)
+                    .then(res => res.blob())
+                    .then(blob => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => {
+                             const res = reader.result as string;
+                             resolve(res.split(',')[1]); 
+                        };
+                        reader.onerror = (e) => reject(new Error("FileReader failed: " + e));
+                        reader.readAsDataURL(blob);
+                    })
+                    .catch(() => {
+                        // Fallback to Canvas if Fetch fails
+                        attemptCanvasDraw(imgElement, resolve, reject);
+                    });
                   return;
               }
 
-              // Strategy 2: Fetch Blob (Best for Blob URLs)
-              try {
-                  const response = await fetch(imgElement.src);
-                  const blob = await response.blob();
-                  const reader = new FileReader();
-                  reader.onloadend = () => {
-                      const result = reader.result as string;
-                      resolve(result.split(',')[1]);
-                  };
-                  reader.onerror = (e) => reject(new Error("FileReader failed: " + e));
-                  reader.readAsDataURL(blob);
-              } catch (fetchErr) {
-                  // Strategy 3: Canvas Fallback (for complex CORS situations or if fetch fails)
-                  console.warn("Fetch strategy failed, trying canvas...", fetchErr);
-                  
-                  const canvas = document.createElement('canvas');
-                  const ctx = canvas.getContext('2d');
-                  if (!ctx) {
-                      reject(new Error("Canvas context unavailable"));
-                      return;
-                  }
-
-                  const processImage = () => {
-                      canvas.width = imgElement.naturalWidth || imgElement.width || 512;
-                      canvas.height = imgElement.naturalHeight || imgElement.height || 512;
-                      try {
-                          ctx.drawImage(imgElement, 0, 0);
-                          const dataURL = canvas.toDataURL('image/png');
-                          resolve(dataURL.split(',')[1]);
-                      } catch (canvasErr) {
-                          reject(new Error("Canvas export failed (likely tainted): " + canvasErr));
-                      }
-                  };
-
-                  if (imgElement.complete && imgElement.naturalHeight !== 0) {
-                      processImage();
-                  } else {
-                      imgElement.crossOrigin = "Anonymous"; // Try to request CORS access
-                      imgElement.onload = processImage;
-                      imgElement.onerror = (e) => reject(new Error("Image load error: " + e));
-                  }
-              }
+              // Fallback default
+              attemptCanvasDraw(imgElement, resolve, reject);
           });
 
           return { 
@@ -161,3 +145,35 @@ export const sendMessageToHalalGPT = async (
     };
   }
 };
+
+// Helper for canvas drawing
+function attemptCanvasDraw(imgElement: any, resolve: any, reject: any) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    if (!ctx) {
+        reject(new Error("Failed to get canvas context"));
+        return;
+    }
+
+    imgElement.crossOrigin = "Anonymous";
+
+    const process = () => {
+        try {
+            canvas.width = imgElement.naturalWidth || imgElement.width || 512;
+            canvas.height = imgElement.naturalHeight || imgElement.height || 512;
+            ctx.drawImage(imgElement, 0, 0);
+            const dataURL = canvas.toDataURL('image/png');
+            resolve(dataURL.split(',')[1]);
+        } catch (e) {
+            reject(new Error("Canvas tainted or draw failed: " + e));
+        }
+    };
+
+    if (imgElement.complete && imgElement.naturalWidth > 0) {
+        process();
+    } else {
+        imgElement.onload = process;
+        imgElement.onerror = (e: any) => reject(new Error("Image failed to load: " + e));
+    }
+}
