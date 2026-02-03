@@ -37,37 +37,84 @@ export const sendMessageToHalalGPT = async (
     
     // --- Image Generation Path (Puter) ---
     if (isImageGenerationRequest) {
-      // RESTRICTION: Enforce strict safety and modesty guidelines via prompt engineering.
-      const safePrompt = `Ensure image is strictly Safe For Work, Modest, and Respectful. 
-      Subject: ${newMessage}. 
-      Restrictions: NO nudity, NO violence, NO gore, NO offensive religious/racial content, NO haram imagery. 
-      Style: High quality, photorealistic or artistic.`;
+      try {
+          // RESTRICTION: Enforce strict safety and modesty guidelines.
+          const safePrompt = `Ensure image is strictly Safe For Work, Modest, and Respectful. 
+          Subject: ${newMessage}. 
+          Restrictions: NO nudity, NO violence, NO gore, NO offensive religious/racial content, NO haram imagery. 
+          Style: High quality, photorealistic or artistic.`;
 
-      console.log("Generating image with prompt:", safePrompt);
+          console.log("Generating image with prompt:", safePrompt);
 
-      // Puter txt2img returns an HTMLImageElement
-      const imgElement = await puter.ai.txt2img(safePrompt);
-      
-      // Robust conversion: Fetch the src (likely a blob URL) and convert to Base64
-      // This avoids "Tainted Canvas" issues associated with drawing external/blob images to canvas immediately
-      const response = await fetch(imgElement.src);
-      const blob = await response.blob();
-      
-      const base64Image = await new Promise<string>((resolve, reject) => {
-         const reader = new FileReader();
-         reader.onloadend = () => {
-             const res = reader.result as string;
-             // Remove "data:image/png;base64," prefix to store raw base64
-             resolve(res.split(',')[1]); 
-         };
-         reader.onerror = (e) => reject(new Error("FileReader failed: " + e));
-         reader.readAsDataURL(blob);
-      });
+          // Puter txt2img returns an HTMLImageElement
+          const imgElement = await puter.ai.txt2img(safePrompt);
+          
+          if (!imgElement) {
+            throw new Error("No image element returned from Puter AI");
+          }
 
-      return { 
-          text: "Here is the generated image based on your request, created with safety guidelines in mind.", 
-          generatedImage: base64Image 
-      };
+          // Robust Base64 Conversion Strategy
+          const base64Image = await new Promise<string>(async (resolve, reject) => {
+              // Strategy 1: If it's already a Data URI
+              if (imgElement.src && imgElement.src.startsWith('data:')) {
+                  resolve(imgElement.src.split(',')[1]);
+                  return;
+              }
+
+              // Strategy 2: Fetch Blob (Best for Blob URLs)
+              try {
+                  const response = await fetch(imgElement.src);
+                  const blob = await response.blob();
+                  const reader = new FileReader();
+                  reader.onloadend = () => {
+                      const result = reader.result as string;
+                      resolve(result.split(',')[1]);
+                  };
+                  reader.onerror = (e) => reject(new Error("FileReader failed: " + e));
+                  reader.readAsDataURL(blob);
+              } catch (fetchErr) {
+                  // Strategy 3: Canvas Fallback (for complex CORS situations or if fetch fails)
+                  console.warn("Fetch strategy failed, trying canvas...", fetchErr);
+                  
+                  const canvas = document.createElement('canvas');
+                  const ctx = canvas.getContext('2d');
+                  if (!ctx) {
+                      reject(new Error("Canvas context unavailable"));
+                      return;
+                  }
+
+                  const processImage = () => {
+                      canvas.width = imgElement.naturalWidth || imgElement.width || 512;
+                      canvas.height = imgElement.naturalHeight || imgElement.height || 512;
+                      try {
+                          ctx.drawImage(imgElement, 0, 0);
+                          const dataURL = canvas.toDataURL('image/png');
+                          resolve(dataURL.split(',')[1]);
+                      } catch (canvasErr) {
+                          reject(new Error("Canvas export failed (likely tainted): " + canvasErr));
+                      }
+                  };
+
+                  if (imgElement.complete && imgElement.naturalHeight !== 0) {
+                      processImage();
+                  } else {
+                      imgElement.crossOrigin = "Anonymous"; // Try to request CORS access
+                      imgElement.onload = processImage;
+                      imgElement.onerror = (e) => reject(new Error("Image load error: " + e));
+                  }
+              }
+          });
+
+          return { 
+              text: "Here is the generated image based on your request, created with safety guidelines in mind.", 
+              generatedImage: base64Image 
+          };
+      } catch (imgError) {
+          console.error("Image Generation Specific Error:", imgError);
+          return {
+              text: "I apologize, but I was unable to generate that image. It may have violated safety guidelines or the service is temporarily unavailable.",
+          };
+      }
     }
 
     // --- Regular Chat / Vision Path (Puter) ---
@@ -108,8 +155,7 @@ export const sendMessageToHalalGPT = async (
     };
 
   } catch (error) {
-    console.error("Error communicating with Puter AI:", error);
-    // Return a user-friendly error message, but log the real one above
+    console.error("Global Service Error:", error);
     return {
       text: "As-salamu alaykum. I am currently experiencing technical difficulties connecting to the service. Please try again in a moment. Insha'Allah.",
     };
