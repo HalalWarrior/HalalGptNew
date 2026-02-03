@@ -38,16 +38,12 @@ export const sendMessageToHalalGPT = async (
     // --- Image Generation Path (Puter) ---
     if (isImageGenerationRequest) {
       try {
-          // RESTRICTION: Enforce strict safety and modesty guidelines.
-          const safePrompt = `Ensure image is strictly Safe For Work, Modest, and Respectful. 
-          Subject: ${newMessage}. 
-          Restrictions: NO nudity, NO violence, NO gore, NO offensive religious/racial content, NO haram imagery. 
-          Style: High quality, photorealistic or artistic.`;
-
-          console.log("Generating image with prompt:", safePrompt);
+          // Reverted to BASIC prompt as requested by user to restore original functionality
+          const prompt = newMessage;
+          console.log("Generating image with prompt:", prompt);
 
           // Puter txt2img returns an HTMLImageElement
-          const imgElement = await puter.ai.txt2img(safePrompt);
+          const imgElement = await puter.ai.txt2img(prompt);
           
           if (!imgElement) {
             throw new Error("No image element returned from Puter AI");
@@ -56,7 +52,7 @@ export const sendMessageToHalalGPT = async (
           // Robust extraction of Base64
           const base64Image = await new Promise<string>((resolve, reject) => {
               
-              // Case 1: The src is ALREADY a base64 data URI (Common in some Puter environments)
+              // Case 1: The src is ALREADY a base64 data URI
               if (imgElement.src && imgElement.src.startsWith('data:image')) {
                   const parts = imgElement.src.split(',');
                   if (parts.length > 1) {
@@ -90,13 +86,13 @@ export const sendMessageToHalalGPT = async (
           });
 
           return { 
-              text: "Here is the generated image based on your request, created with safety guidelines in mind.", 
+              text: "Here is the generated image based on your request.", 
               generatedImage: base64Image 
           };
       } catch (imgError) {
           console.error("Image Generation Specific Error:", imgError);
           return {
-              text: "I apologize, but I was unable to generate that image. It may have violated safety guidelines or the service is temporarily unavailable.",
+              text: "I apologize, but I was unable to generate that image due to a technical issue.",
           };
       }
     }
