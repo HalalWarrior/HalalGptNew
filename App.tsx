@@ -33,7 +33,7 @@ export default function App() {
   const initRan = useRef(false);
   const isSendingRef = useRef(false);
 
-  // Initialize Auth and Load Data - STRICT MODE SAFE
+  // Initialize Auth and Load Data
   useEffect(() => {
     if (initRan.current) return;
     initRan.current = true;
@@ -49,8 +49,17 @@ export default function App() {
              setUser(currentUser);
              // Load from cloud if user exists
              const cloudData = await puter.kv.get(STORAGE_KEY);
-             if (cloudData) {
-               setSessions(cloudData);
+             if (cloudData && Array.isArray(cloudData)) {
+               // CLEANUP: Only load sessions that actually have messages
+               const validCloudSessions = cloudData.filter((s: ChatSession) => 
+                 s.messages && s.messages.length > 0
+               );
+               
+               setSessions(prev => {
+                   const existingIds = new Set(prev.map(s => s.id));
+                   const uniqueCloudSessions = validCloudSessions.filter((s: ChatSession) => !existingIds.has(s.id));
+                   return [...prev, ...uniqueCloudSessions];
+               });
              }
            } 
         }
@@ -69,7 +78,9 @@ export default function App() {
   useEffect(() => {
     const save = async () => {
       if (!isDataLoaded || !user) return;
-      await puter.kv.set(STORAGE_KEY, sessions);
+      // FINAL GUARD: Never save empty sessions to the cloud
+      const validSessions = sessions.filter(s => s.messages && s.messages.length > 0);
+      await puter.kv.set(STORAGE_KEY, validSessions);
     };
 
     const timeoutId = setTimeout(save, 1000);
@@ -97,33 +108,34 @@ export default function App() {
     }
   }, [messages.length]);
 
-  // Helper to update sessions state safely
+  // Robust Session Updater
   const updateSessionState = (targetId: string, updatedMessages: Message[], titleExcerpt?: string) => {
     setSessions(prevSessions => {
-      const exists = prevSessions.some(s => s.id === targetId);
-      
-      if (exists) {
-        return prevSessions.map(session => 
-          session.id === targetId 
-            ? { ...session, messages: updatedMessages } 
-            : session
-        );
-      } else {
-        // Create new if it doesn't exist
-        const newTitle = titleExcerpt || "New Conversation";
-        const newSession: ChatSession = {
-          id: targetId,
-          title: newTitle,
-          messages: updatedMessages,
-          createdAt: Date.now()
-        };
-        return [newSession, ...prevSessions];
-      }
+      // 1. Remove the target session if it exists (to re-add it at the top)
+      // 2. Also remove any "Ghost" sessions that might have 0 messages
+      const otherSessions = prevSessions.filter(s => 
+        s.id !== targetId && s.messages.length > 0
+      );
+
+      const existingSession = prevSessions.find(s => s.id === targetId);
+
+      const newSession: ChatSession = {
+        id: targetId,
+        // Title logic: 
+        // 1. Use passed title if available
+        // 2. Fallback to existing title
+        // 3. Fallback to "New Conversation" ONLY if we have no messages (which shouldn't happen here)
+        title: titleExcerpt || existingSession?.title || "Conversation",
+        messages: updatedMessages,
+        createdAt: existingSession?.createdAt || Date.now()
+      };
+
+      // Put updated session at the top
+      return [newSession, ...otherSessions];
     });
   };
 
   const handleSend = async () => {
-    // Prevent submission if empty, loading, OR ALREADY SENDING (Fixes double submission bug)
     if ((!input.trim() && !selectedImage) || isLoading || isSendingRef.current) return;
     
     isSendingRef.current = true;
@@ -138,7 +150,6 @@ export default function App() {
     setSelectedImage(null);
     setIsImageGenMode(false);
     
-    // Determine the active Session ID to use for this entire transaction
     let activeSessionId = currentSessionId;
     
     // If no session exists, create an ID immediately
@@ -148,14 +159,18 @@ export default function App() {
       setCurrentSessionId(activeSessionId);
     }
 
-    // Safety check (TypeScript)
     if (!activeSessionId) {
         setIsLoading(false);
         isSendingRef.current = false;
         return;
     }
 
-    const sessionTitle = isNewSession 
+    // Determine Title
+    // If it's a new session, or the current title is generic, update it based on user input
+    const currentSession = sessions.find(s => s.id === activeSessionId);
+    const shouldUpdateTitle = isNewSession || !currentSession || currentSession.title === "New Conversation" || currentSession.title === "Conversation";
+    
+    const sessionTitle = shouldUpdateTitle
       ? (userText.length > 30 ? userText.substring(0, 30) + '...' : userText)
       : undefined;
 
@@ -170,7 +185,7 @@ export default function App() {
     const newMessages = [...messages, userMsg];
     setMessages(newMessages);
     
-    // Force update session list immediately so it persists
+    // UPDATE 1: Save User Message immediately
     updateSessionState(activeSessionId, newMessages, sessionTitle);
 
     const loadingId = (Date.now() + 1).toString();
@@ -206,8 +221,9 @@ export default function App() {
           return msg;
         });
         
-        // Update session list again with the response
-        updateSessionState(activeSessionId!, finalMessages);
+        // UPDATE 2: Save AI Response
+        // Crucial: Pass sessionTitle again to ensure it doesn't revert if React batched updates weirdly
+        updateSessionState(activeSessionId!, finalMessages, sessionTitle);
         return finalMessages;
       });
 
@@ -223,7 +239,7 @@ export default function App() {
           }
           return msg;
         });
-        updateSessionState(activeSessionId!, errorMessages);
+        updateSessionState(activeSessionId!, errorMessages, sessionTitle);
         return errorMessages;
       });
     } finally {
@@ -260,7 +276,7 @@ export default function App() {
   };
 
   const startNewChat = () => {
-     if (isLoading) return; // Don't allow switching while loading
+     if (isLoading) return;
      setCurrentSessionId(null);
      setMessages([]); 
      setSidebarOpen(false);
@@ -270,7 +286,7 @@ export default function App() {
   };
 
   const selectSession = (sessionId: string) => {
-    if (isLoading) return; // Don't allow switching while loading
+    if (isLoading) return;
     const session = sessions.find(s => s.id === sessionId);
     if (session) {
       setCurrentSessionId(sessionId);
@@ -287,7 +303,16 @@ export default function App() {
         setUser(newUser);
         setIsDataLoaded(false);
         const cloudData = await puter.kv.get(STORAGE_KEY);
-        setSessions(cloudData || []);
+        
+        setSessions(prev => {
+             const existingIds = new Set(prev.map(s => s.id));
+             // Filter ghosts here too
+             const validCloudSessions = (cloudData || []).filter((s: ChatSession) => 
+               !existingIds.has(s.id) && s.messages && s.messages.length > 0
+             );
+             return [...prev, ...validCloudSessions];
+        });
+        
         setIsDataLoaded(true);
       }
     } catch (e) {
@@ -304,6 +329,9 @@ export default function App() {
   };
 
   // --- RENDERING ---
+
+  // Helper to filter visible sessions for sidebar
+  const visibleSessions = sessions.filter(s => s.messages && s.messages.length > 0);
 
   if (isAuthLoading) {
     return (
@@ -369,7 +397,7 @@ export default function App() {
       <Sidebar 
         onNewChat={startNewChat} 
         isOpen={sidebarOpen}
-        sessions={sessions}
+        sessions={visibleSessions} // PASS FILTERED SESSIONS
         currentSessionId={currentSessionId}
         onSelectSession={selectSession}
         user={user}
