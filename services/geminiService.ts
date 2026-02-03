@@ -38,39 +38,30 @@ export const sendMessageToHalalGPT = async (
     // --- Image Generation Path (Puter) ---
     if (isImageGenerationRequest) {
       // RESTRICTION: Enforce strict safety and modesty guidelines via prompt engineering.
-      // This modifies the user's prompt to explicitly forbid inappropriate content.
       const safePrompt = `Ensure image is strictly Safe For Work, Modest, and Respectful. 
       Subject: ${newMessage}. 
       Restrictions: NO nudity, NO violence, NO gore, NO offensive religious/racial content, NO haram imagery. 
       Style: High quality, photorealistic or artistic.`;
 
+      console.log("Generating image with prompt:", safePrompt);
+
       // Puter txt2img returns an HTMLImageElement
       const imgElement = await puter.ai.txt2img(safePrompt);
       
-      // Convert HTMLImageElement to Base64 string for storage/display
+      // Robust conversion: Fetch the src (likely a blob URL) and convert to Base64
+      // This avoids "Tainted Canvas" issues associated with drawing external/blob images to canvas immediately
+      const response = await fetch(imgElement.src);
+      const blob = await response.blob();
+      
       const base64Image = await new Promise<string>((resolve, reject) => {
-         const canvas = document.createElement('canvas');
-         // Wait for image to load if not complete
-         if (imgElement.complete) {
-            process();
-         } else {
-            imgElement.onload = process;
-            imgElement.onerror = reject;
-         }
-
-         function process() {
-             canvas.width = imgElement.naturalWidth || imgElement.width;
-             canvas.height = imgElement.naturalHeight || imgElement.height;
-             const ctx = canvas.getContext('2d');
-             if (!ctx) {
-                 reject(new Error("Canvas context failed"));
-                 return;
-             }
-             ctx.drawImage(imgElement, 0, 0);
-             const dataURL = canvas.toDataURL('image/png');
-             // Return just the base64 data, removing the prefix
-             resolve(dataURL.split(',')[1]);
-         }
+         const reader = new FileReader();
+         reader.onloadend = () => {
+             const res = reader.result as string;
+             // Remove "data:image/png;base64," prefix to store raw base64
+             resolve(res.split(',')[1]); 
+         };
+         reader.onerror = (e) => reject(new Error("FileReader failed: " + e));
+         reader.readAsDataURL(blob);
       });
 
       return { 
@@ -85,9 +76,6 @@ export const sendMessageToHalalGPT = async (
     let fullPrompt = SYSTEM_INSTRUCTION + "\n\n--- Conversation History ---\n";
 
     // Iterate history to build context, excluding the very last message which is 'newMessage'
-    // because we want to format the last message specially with the 'HalalGPT:' prompt
-    // and handle its attachment if it exists.
-    
     const contextMessages = history.slice(0, -1);
     
     for (const msg of contextMessages) {
@@ -103,7 +91,6 @@ export const sendMessageToHalalGPT = async (
     
     if (attachment) {
         // Puter AI Chat with Image (Multimodal)
-        // Pass the image URL or Base64 Data URI as second argument
         response = await puter.ai.chat(fullPrompt, attachment);
     } else {
         // Text-only Chat
@@ -117,12 +104,12 @@ export const sendMessageToHalalGPT = async (
 
     return { 
       text: text,
-      // Puter standard chat doesn't return grounding metadata in the same format as Gemini SDK
       groundingMetadata: undefined 
     };
 
   } catch (error) {
     console.error("Error communicating with Puter AI:", error);
+    // Return a user-friendly error message, but log the real one above
     return {
       text: "As-salamu alaykum. I am currently experiencing technical difficulties connecting to the service. Please try again in a moment. Insha'Allah.",
     };
