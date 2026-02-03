@@ -28,9 +28,16 @@ export default function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // Refs to prevent race conditions
+  const initRan = useRef(false);
+  const isSendingRef = useRef(false);
 
-  // Initialize Auth and Load Data
+  // Initialize Auth and Load Data - STRICT MODE SAFE
   useEffect(() => {
+    if (initRan.current) return;
+    initRan.current = true;
+
     const init = async () => {
       setIsAuthLoading(true);
       try {
@@ -46,7 +53,6 @@ export default function App() {
                setSessions(cloudData);
              }
            } 
-           // If no user, we simply do nothing. The render logic will show the Landing Page.
         }
       } catch (err) {
         console.error("Initialization error:", err);
@@ -91,36 +97,38 @@ export default function App() {
     }
   }, [messages.length]);
 
-  const updateCurrentSession = (updatedMessages: Message[], titleExcerpt?: string) => {
-    const timestamp = Date.now();
-    
-    if (currentSessionId) {
-      setSessions(prev => prev.map(session => 
-        session.id === currentSessionId 
-          ? { ...session, messages: updatedMessages } 
-          : session
-      ));
-    } else {
-      const newId = Date.now().toString();
-      const newTitle = titleExcerpt || "New Conversation";
+  // Helper to update sessions state safely
+  const updateSessionState = (targetId: string, updatedMessages: Message[], titleExcerpt?: string) => {
+    setSessions(prevSessions => {
+      const exists = prevSessions.some(s => s.id === targetId);
       
-      const newSession: ChatSession = {
-        id: newId,
-        title: newTitle,
-        messages: updatedMessages,
-        createdAt: timestamp
-      };
-      
-      setSessions(prev => [newSession, ...prev]);
-      setCurrentSessionId(newId);
-    }
+      if (exists) {
+        return prevSessions.map(session => 
+          session.id === targetId 
+            ? { ...session, messages: updatedMessages } 
+            : session
+        );
+      } else {
+        // Create new if it doesn't exist
+        const newTitle = titleExcerpt || "New Conversation";
+        const newSession: ChatSession = {
+          id: targetId,
+          title: newTitle,
+          messages: updatedMessages,
+          createdAt: Date.now()
+        };
+        return [newSession, ...prevSessions];
+      }
+    });
   };
 
   const handleSend = async () => {
-    if ((!input.trim() && !selectedImage) || isLoading) return;
-
-    // User is guaranteed to be logged in due to the landing page gate
+    // Prevent submission if empty, loading, OR ALREADY SENDING (Fixes double submission bug)
+    if ((!input.trim() && !selectedImage) || isLoading || isSendingRef.current) return;
     
+    isSendingRef.current = true;
+    setIsLoading(true);
+
     const userText = input.trim();
     const currentImage = selectedImage;
     const isGenMode = isImageGenMode;
@@ -130,8 +138,24 @@ export default function App() {
     setSelectedImage(null);
     setIsImageGenMode(false);
     
-    const isFirstUserMessage = currentSessionId === null;
-    const sessionTitle = isFirstUserMessage 
+    // Determine the active Session ID to use for this entire transaction
+    let activeSessionId = currentSessionId;
+    
+    // If no session exists, create an ID immediately
+    const isNewSession = activeSessionId === null;
+    if (isNewSession) {
+      activeSessionId = Date.now().toString();
+      setCurrentSessionId(activeSessionId);
+    }
+
+    // Safety check (TypeScript)
+    if (!activeSessionId) {
+        setIsLoading(false);
+        isSendingRef.current = false;
+        return;
+    }
+
+    const sessionTitle = isNewSession 
       ? (userText.length > 30 ? userText.substring(0, 30) + '...' : userText)
       : undefined;
 
@@ -145,9 +169,9 @@ export default function App() {
 
     const newMessages = [...messages, userMsg];
     setMessages(newMessages);
-    updateCurrentSession(newMessages, sessionTitle);
-
-    setIsLoading(true);
+    
+    // Force update session list immediately so it persists
+    updateSessionState(activeSessionId, newMessages, sessionTitle);
 
     const loadingId = (Date.now() + 1).toString();
     const loadingMsg: Message = {
@@ -182,7 +206,8 @@ export default function App() {
           return msg;
         });
         
-        updateCurrentSession(finalMessages);
+        // Update session list again with the response
+        updateSessionState(activeSessionId!, finalMessages);
         return finalMessages;
       });
 
@@ -198,11 +223,12 @@ export default function App() {
           }
           return msg;
         });
-        updateCurrentSession(errorMessages);
+        updateSessionState(activeSessionId!, errorMessages);
         return errorMessages;
       });
     } finally {
       setIsLoading(false);
+      isSendingRef.current = false; // Unlock
       if (window.innerWidth > 768) {
         inputRef.current?.focus();
       }
@@ -234,6 +260,7 @@ export default function App() {
   };
 
   const startNewChat = () => {
+     if (isLoading) return; // Don't allow switching while loading
      setCurrentSessionId(null);
      setMessages([]); 
      setSidebarOpen(false);
@@ -243,6 +270,7 @@ export default function App() {
   };
 
   const selectSession = (sessionId: string) => {
+    if (isLoading) return; // Don't allow switching while loading
     const session = sessions.find(s => s.id === sessionId);
     if (session) {
       setCurrentSessionId(sessionId);
@@ -253,9 +281,7 @@ export default function App() {
 
   const handleLogin = async () => {
     try {
-      // Prompt sign in
       await puter.auth.signIn();
-      // Get the user after sign in
       const newUser = await puter.auth.getUser();
       if (newUser) {
         setUser(newUser);
